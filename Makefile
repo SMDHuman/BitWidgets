@@ -1,10 +1,10 @@
-RAYLIB := include/raylib/build/raylib/libraylib.a
+RAYLIB := build/raylib/libraylib.a
 
 build/bitwidgets: src/bitwidgets.c build $(RAYLIB)
 	cc -Wall -Wextra -o build/bitwidgets src/bitwidgets.c -I include $(RAYLIB) -lm
 
-$(RAYLIB):
-	cd include/raylib && mkdir build && cd build && cmake .. && make -j4
+$(RAYLIB): build
+	cd build && cmake ../include/raylib && make -j24
 
 build: 
 	mkdir -p build
