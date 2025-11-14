@@ -65,20 +65,29 @@ typedef struct{
 }wire_t;
 
 //-----------------------------------------------------------------------------
-// Global Variables
-hh_darray_t global_gates;
-hh_darray_t global_wires;
+// BitWidget structs and functions definitions
+typedef struct{
+    char* filename;
+    Image image;
+    hh_darray_t gates; // sizeof(gate_t)
+    hh_darray_t wires; // sizeof(wire_t)
+    hh_darray_t crossings; // sizeof(size_t)*2
+}bit_widget_t;
+
+int bitwid_init(bit_widget_t* widget, char* filename);
+void bitwid_deinit(bit_widget_t* widget);
+void bitwid_render_screen(bit_widget_t* widget, int x, int y, int scale);
+void bitwid_simulate(bit_widget_t* widget, int steps);
 
 //-----------------------------------------------------------------------------
 // Function Prototypes
-void extract_gates_from_image(Image* img);
-void extract_wires_from_image(Image* img);
-void attack_gate_to_wires();
-void step_simulation();
-wire_color_e get_wire_color(Color color);
-Color lower_color(Color color);
-size_t get_wire_from_pixel(size_t x, size_t y);
-size_t get_gate_from_pixel(size_t x, size_t y);
+static void extract_gates(bit_widget_t* widget);
+static void extract_wires(bit_widget_t* widget);
+static void attack_gate_to_wires(bit_widget_t* widget);
+static wire_color_e get_wire_color(Color color);
+static Color lower_color(Color color);
+static size_t get_wire_from_pixel(bit_widget_t* widget, size_t x, size_t y);
+static size_t get_gate_from_pixel(bit_widget_t* widget, size_t x, size_t y);
 
 //-----------------------------------------------------------------------------
 
@@ -122,34 +131,10 @@ int main(int argc, char**argv){
 	InitWindow(100, 100, "BitWidgets");
 	SetTargetFPS(60);
 	//...
-	hda_init(&global_gates, sizeof(gate_t));
-	hda_init(&global_wires, sizeof(wire_t));
+
 	//...
-	Image circuit_img = LoadImage(hap_get_positional(argpar, 0));
-	if(circuit_img.data == NULL){
-		printf("Error: Failed to load circuit image file: %s\n", hap_get_positional(argpar, 0));
-		return -1;
-	}
-	printf("[BITWIDGETS] Extracting gates...\n");
-	extract_gates_from_image(&circuit_img);
-	//...
-	printf("[BITWIDGETS] Extracting Wires...\n");
-	extract_wires_from_image(&circuit_img);
-	//...
-	printf("[BITWIDGETS] Attaching gates and wires...\n");
-	attack_gate_to_wires();
-	printf("[BITWIDGETS] Ready!\n");
-	//-----------------------------------------------------------------------------
-	//Preprocess image
-    ImageColorReplace(&circuit_img, (Color){0, 0, 0, 255}, 
-    							    (Color){0, 0, 0, 0});
-	ImageResizeNN(&circuit_img, circuit_img.width*render_scale,
-							   circuit_img.height*render_scale);
-	//-----------------------------------------------------------------------------
-	// Load as Texture
-	Texture2D circuit_2d = LoadTextureFromImage(circuit_img);
-	//...
-	SetWindowSize(circuit_2d.width, circuit_2d.height);
+	bit_widget_t widget; bitwid_init(&widget, hap_get_positional(argpar, 0));
+	SetWindowSize(widget.image.width * render_scale, widget.image.height * render_scale);
 	//-----------------------------------------------------------------------------
 	// Main Loop
     while (!WindowShouldClose())
@@ -157,21 +142,20 @@ int main(int argc, char**argv){
     	if(IsMouseButtonPressed(0)){
     		int mouse_x = GetMouseX() / render_scale;
     		int mouse_y = GetMouseY() / render_scale;
-    		size_t wire_id = get_wire_from_pixel(mouse_x, mouse_y);
+    		size_t wire_id = get_wire_from_pixel(&widget, mouse_x, mouse_y);
     		if(wire_id != (size_t)-1){
     			printf("wire id: %ld\n", wire_id);
-	    		wire_t* wire = hda_get_reference(&global_wires, wire_id);
+	    		wire_t* wire = hda_get_reference(&widget.wires, wire_id);
 					if(wire->touchable) wire->state = !wire->state;
     		}
     	}
     	
-			BeginDrawing();
 			//---------------------------------------------------------------------
 			// Simulation Steps
 			static long sim_accumulator = 0;
 			double start_time = GetTime();
 			while(sim_accumulator < GetTime() * simulation_rate){
-				step_simulation();
+				bitwid_simulate(&widget, 1);
 				sim_accumulator++;
 				if(GetTime() - start_time > 1){
 					printf("Warning: Simulation is lagging behind real time!\n");
@@ -180,70 +164,50 @@ int main(int argc, char**argv){
 			}
 			// Report Performance
 			static double last_report_time = 0;
-			if(GetTime() - last_report_time >= 1.0f){
+			if(GetTime() - last_report_time >= 0.1f){
 				printf("[BITWIDGETS] FPS: %d| Gates: %ld | Wires: %ld\n", 
-							GetFPS(),  hda_get_item_fill(&global_gates), hda_get_item_fill(&global_wires));
+							GetFPS(),  hda_get_item_fill(&widget.gates), hda_get_item_fill(&widget.wires));
 				last_report_time = GetTime();
 			}
 			//---------------------------------------------------------------------
+			BeginDrawing();
+			//...
 			ClearBackground((Color){0, 0, 0, 0});
-		
-			// Draw Gates
-			for(size_t i = 0; i < hda_get_item_fill(&global_gates); i++){
-				gate_t* gate = hda_get_reference(&global_gates, i);
-				DrawRectangle(gate->x*render_scale, gate->y*render_scale, 
-								render_scale, render_scale, GetColor(GATE_INPUT));
-				DrawRectangle((gate->x + direction_x[gate->direction])*render_scale, 
-								(gate->y + direction_y[gate->direction])*render_scale, 
-								render_scale, render_scale, GetColor(gate->type));
-			}
-
-			// Draw Wires
-			for(size_t i = 0; i < hda_get_item_fill(&global_wires); i++){
-				wire_t* wire = hda_get_reference(&global_wires, i);
-				for(size_t p = 0; p < hda_get_item_fill(&wire->pixels); p++){
-					struct {size_t x, y;} pix;
-					hda_get(&wire->pixels, p, &pix);
-					if(wire->state){
-						DrawRectangle(pix.x*render_scale, pix.y*render_scale, 
-											render_scale, render_scale, GetColor(wire->color));
-					}
-					else{
-						DrawRectangle(pix.x*render_scale, pix.y*render_scale, 
-											render_scale, render_scale, lower_color(GetColor(wire->color)));
-					}
-				}
-			}
+			bitwid_render_screen(&widget, 0, 0, render_scale);
        	
 			//---------------------------------------------------------------------
 			EndDrawing();
     }
 
 	//---------------------------------------------------------------------------
-    CloseWindow();
+	CloseWindow();
+	bitwid_deinit(&widget);
+	hap_deinit(argpar);
 	return 0;
 }
 
 //-----------------------------------------------------------------------------
-void extract_gates_from_image(Image* img){
-	for(size_t y = 0; y < (unsigned int)img->height; y++){
-		for(size_t x = 0; x < (unsigned int)img->width; x++){
-			Color color = GetImageColor(*img, x, y);
+static void extract_gates(bit_widget_t* widget){
+	Image img = ImageCopy(widget->image);
+	// Find Gates
+	for(size_t y = 0; y < (unsigned int)img.height; y++){
+		for(size_t x = 0; x < (unsigned int)img.width; x++){
+			Color color = GetImageColor(img, x, y);
 			if(ColorToInt(color) == (int)GATE_INPUT){
 				for(int n = 0; n < 4; n++){
-					Color n_color = GetImageColor(*img, x + direction_x[n], 
+					Color n_color = GetImageColor(img, x + direction_x[n], 
 													   y + direction_y[n]);
 					if(ColorToInt(n_color) == (int)NOT_GATE){
-						hda_append(&global_gates, 0);
-						gate_t* new_gate = hda_get_end_reference(&global_gates);
+						hda_append(&widget->gates, 0);
+						gate_t* new_gate = hda_get_end_reference(&widget->gates);
 						new_gate->x = x; 
 						new_gate->y = y;
 						new_gate->type = NOT_GATE;
 						new_gate->direction = n;
 					}
 					if(ColorToInt(n_color) == (int)DIODE){
-						hda_append(&global_gates, 0);
-						gate_t* new_gate = hda_get_end_reference(&global_gates);
+						hda_append(&widget->gates, 0);
+						gate_t* new_gate = hda_get_end_reference(&widget->gates);
 						new_gate->x = x; 
 						new_gate->y = y;
 						new_gate->type = DIODE;
@@ -255,26 +219,29 @@ void extract_gates_from_image(Image* img){
 			}	
 		}
 	}
+	UnloadImage(img);
+}
+//-----------------------------------------------------------------------------
+void extract_wires(bit_widget_t* widget){
+	Image img = ImageCopy(widget->image);
 	// Remove Gates
-	for(size_t i = 0; i < hda_get_item_fill(&global_gates); i++){
-		gate_t* gate = hda_get_reference(&global_gates, i);
-		ImageDrawPixel(img, gate->x, gate->y, (Color){0, 0, 0, 0});
-		ImageDrawPixel(img, gate->x + direction_x[gate->direction], 
+	for(size_t i = 0; i < hda_get_item_fill(&widget->gates); i++){
+		gate_t* gate = hda_get_reference(&widget->gates, i);
+		ImageDrawPixel(&img, gate->x, gate->y, (Color){0, 0, 0, 0});
+		ImageDrawPixel(&img, gate->x + direction_x[gate->direction], 
 							gate->y + direction_y[gate->direction], 
 							(Color){0, 0, 0, 0});
 	}
-}
-//-----------------------------------------------------------------------------
-void extract_wires_from_image(Image* img){
-	for(size_t y = 0; y < (unsigned int)img->height; y++){
-		for(size_t x = 0; x < (unsigned int)img->width; x++){
-			Color color = GetImageColor(*img, x, y);
+	// Find Wires
+	for(size_t y = 0; y < (unsigned int)img.height; y++){
+		for(size_t x = 0; x < (unsigned int)img.width; x++){
+			Color color = GetImageColor(img, x, y);
 			wire_color_e temp_color = get_wire_color(color);
 			if(temp_color == SPACE) continue;	
 			if(temp_color == WIRE_CROSSING) continue;	
 			//...
-			hda_append(&global_wires, 0);
-			wire_t* new_wire = hda_get_end_reference(&global_wires);
+			hda_append(&widget->wires, 0);
+			wire_t* new_wire = hda_get_end_reference(&widget->wires);
 			hda_init(&new_wire->pixels, sizeof(size_t)*2);
 			new_wire->color = temp_color;
 			new_wire->touchable = true;
@@ -291,24 +258,25 @@ void extract_wires_from_image(Image* img){
 				hda_pop(&skipper, 0, &skip);
 				if(!skip){
 					hda_append(&new_wire->pixels, &pix);
-					ImageDrawPixel(img, pix.x, pix.y, (Color){0, 0, 0, 0});
+					ImageDrawPixel(&img, pix.x, pix.y, (Color){0, 0, 0, 0});
 				}
 				// Check neighbors
-				if(pix.x < (unsigned int)img->width-1){
-					if(get_wire_color(GetImageColor(*img, pix.x + 1, pix.y)) == new_wire->color){
+				if(pix.x < (unsigned int)img.width-1){
+					if(get_wire_color(GetImageColor(img, pix.x + 1, pix.y)) == new_wire->color){
 						if(hda_append_no_dupe(&checker, (size_t[]){pix.x + 1, pix.y})){
 							hda_append(&skipper, 0);
 						}
 					}
 					if(!skip){
-						if(get_wire_color(GetImageColor(*img, pix.x + 1, pix.y)) == WIRE_CROSSING){	
-							if(get_wire_color(GetImageColor(*img, pix.x + 2, pix.y)) == new_wire->color){
+						if(get_wire_color(GetImageColor(img, pix.x + 1, pix.y)) == WIRE_CROSSING){	
+							hda_append(&widget->crossings, (size_t[]){pix.x + 1, pix.y});
+							if(get_wire_color(GetImageColor(img, pix.x + 2, pix.y)) == new_wire->color){
 								if(hda_append_no_dupe(&checker, (size_t[]){pix.x + 2, pix.y})){
 									hda_append(&skipper, 0);
 								}
 							}
 						}
-						if(get_gate_from_pixel(pix.x + 1, pix.y) != (size_t)-1){
+						if(get_gate_from_pixel(widget, pix.x + 1, pix.y) != (size_t)-1){
 							if(hda_append_no_dupe(&checker, (size_t[]){pix.x + 1, pix.y})){
 								hda_append(&skipper, &skip_val);						
 							}
@@ -316,41 +284,43 @@ void extract_wires_from_image(Image* img){
 					}
 				}
 				if(pix.x > 0){
-					if(get_wire_color(GetImageColor(*img, pix.x - 1, pix.y)) == new_wire->color){
+					if(get_wire_color(GetImageColor(img, pix.x - 1, pix.y)) == new_wire->color){
 						if(hda_append_no_dupe(&checker, (size_t[]){pix.x - 1, pix.y})){
 							hda_append(&skipper, 0);
 						}
 					}
 					if(!skip){
-						if(get_wire_color(GetImageColor(*img, pix.x - 1, pix.y)) == WIRE_CROSSING){	
-							if(get_wire_color(GetImageColor(*img, pix.x - 2, pix.y)) == new_wire->color){
+						if(get_wire_color(GetImageColor(img, pix.x - 1, pix.y)) == WIRE_CROSSING){	
+							hda_append(&widget->crossings, (size_t[]){pix.x - 1, pix.y});
+							if(get_wire_color(GetImageColor(img, pix.x - 2, pix.y)) == new_wire->color){
 								if(hda_append_no_dupe(&checker, (size_t[]){pix.x - 2, pix.y})){
 									hda_append(&skipper, 0);
 								}
 							}
 						}
-						if(get_gate_from_pixel(pix.x - 1, pix.y) != (size_t)-1){
+						if(get_gate_from_pixel(widget, pix.x - 1, pix.y) != (size_t)-1){
 							if(hda_append_no_dupe(&checker, (size_t[]){pix.x - 1, pix.y})){
 								hda_append(&skipper, &skip_val);						
 							}
 						}
 					}
 				}
-				if(pix.y < (unsigned int)img->height-1){
-					if(get_wire_color(GetImageColor(*img, pix.x, pix.y + 1)) == new_wire->color){
+				if(pix.y < (unsigned int)img.height-1){
+					if(get_wire_color(GetImageColor(img, pix.x, pix.y + 1)) == new_wire->color){
 						if(hda_append_no_dupe(&checker, (size_t[]){pix.x, pix.y + 1})){
 							hda_append(&skipper, 0);
 						}
 					}
 					if(!skip){
-						if(get_wire_color(GetImageColor(*img, pix.x, pix.y + 1)) == WIRE_CROSSING){	
-							if(get_wire_color(GetImageColor(*img, pix.x, pix.y + 2)) == new_wire->color){
+						if(get_wire_color(GetImageColor(img, pix.x, pix.y + 1)) == WIRE_CROSSING){	
+							hda_append(&widget->crossings, (size_t[]){pix.x, pix.y + 1});
+							if(get_wire_color(GetImageColor(img, pix.x, pix.y + 2)) == new_wire->color){
 								if(hda_append_no_dupe(&checker, (size_t[]){pix.x, pix.y + 2})){
 									hda_append(&skipper, 0);
 								}
 							}
 						}
-						if(get_gate_from_pixel(pix.x, pix.y + 1) != (size_t)-1){
+						if(get_gate_from_pixel(widget, pix.x, pix.y + 1) != (size_t)-1){
 							if(hda_append_no_dupe(&checker, (size_t[]){pix.x, pix.y + 1})){
 								hda_append(&skipper, &skip_val);						
 							}
@@ -358,20 +328,21 @@ void extract_wires_from_image(Image* img){
 					}
 				}
 				if(pix.y > 0){
-					if(get_wire_color(GetImageColor(*img, pix.x, pix.y - 1)) == new_wire->color){
+					if(get_wire_color(GetImageColor(img, pix.x, pix.y - 1)) == new_wire->color){
 						if(hda_append_no_dupe(&checker, (size_t[]){pix.x, pix.y - 1})){
 							hda_append(&skipper, 0);
 						}
 					}
 					if(!skip){
-						if(get_wire_color(GetImageColor(*img, pix.x, pix.y - 1)) == WIRE_CROSSING){	
-							if(get_wire_color(GetImageColor(*img, pix.x, pix.y - 2)) == new_wire->color){
+						if(get_wire_color(GetImageColor(img, pix.x, pix.y - 1)) == WIRE_CROSSING){
+							hda_append(&widget->crossings, (size_t[]){pix.x, pix.y - 1});	
+							if(get_wire_color(GetImageColor(img, pix.x, pix.y - 2)) == new_wire->color){
 								if(hda_append_no_dupe(&checker, (size_t[]){pix.x, pix.y - 2})){
 									hda_append(&skipper, 0);
 								}
 							}
 						}
-						if(get_gate_from_pixel(pix.x, pix.y - 1) != (size_t)-1){
+						if(get_gate_from_pixel(widget, pix.x, pix.y - 1) != (size_t)-1){
 							if(hda_append_no_dupe(&checker, (size_t[]){pix.x, pix.y - 1})){
 								hda_append(&skipper, &skip_val);						
 							}
@@ -379,8 +350,11 @@ void extract_wires_from_image(Image* img){
 					}
 				}
 			}
+			hda_deinit(&checker);
+			hda_deinit(&skipper);
 		}
 	}
+	UnloadImage(img);
 }
 
 //-----------------------------------------------------------------------------
@@ -405,21 +379,21 @@ Color lower_color(Color color){
 }
 
 //-----------------------------------------------------------------------------
-void attack_gate_to_wires(){
-	for(size_t i = 0; i < hda_get_item_fill(&global_gates); i++){
-		gate_t* gate = hda_get_reference(&global_gates, i);
+void attack_gate_to_wires(bit_widget_t* widget){
+	for(size_t i = 0; i < hda_get_item_fill(&widget->gates); i++){
+		gate_t* gate = hda_get_reference(&widget->gates, i);
 		for(int d = 0; d < 4; d++){
-			size_t input_id = get_wire_from_pixel(gate->x + direction_x[d], gate->y + direction_y[d]);
+			size_t input_id = get_wire_from_pixel(widget, gate->x + direction_x[d], gate->y + direction_y[d]);
 			if(input_id != (size_t)-1){
 				gate->input_wire_id = input_id;
 				break;
 			}
 		}
 		for(int d = 0; d < 4; d++){
-			size_t output_id = get_wire_from_pixel(gate->x + direction_x[d] + direction_x[gate->direction], 
+			size_t output_id = get_wire_from_pixel(widget, gate->x + direction_x[d] + direction_x[gate->direction], 
 												   gate->y + direction_y[d] + direction_y[gate->direction]);
 			if(output_id != (size_t)-1){
-				wire_t* wire = hda_get_reference(&global_wires, output_id);
+				wire_t* wire = hda_get_reference(&widget->wires, output_id);
 				wire->touchable = false;
 				gate->output_wire_id = output_id;
 				break;
@@ -429,37 +403,9 @@ void attack_gate_to_wires(){
 }
 
 //-----------------------------------------------------------------------------
-void step_simulation(){
-	//Clear buffers
-	for(size_t i = 0; i < hda_get_item_fill(&global_wires); i++){
-		wire_t* wire = hda_get_reference(&global_wires, i);
-		if(!wire->touchable)
-			wire->state_buf = 0;
-	}
-	// Evaluate Outputs of gates
-	for(size_t i = 0; i < hda_get_item_fill(&global_gates); i++){
-		gate_t* gate = hda_get_reference(&global_gates, i);
-		wire_t* wire_out = hda_get_reference(&global_wires, gate->output_wire_id);
-		wire_t* wire_in = hda_get_reference(&global_wires, gate->input_wire_id);
-		if(gate->type == NOT_GATE){
-			if(!wire_in->state) wire_out->state_buf = 1;
-		}
-		else if(gate->type == DIODE){
-			if(wire_in->state) wire_out->state_buf = 1;
-		}
-	}
-	// Swap Buffers
-	for(size_t i = 0; i < hda_get_item_fill(&global_wires); i++){
-		wire_t* wire = hda_get_reference(&global_wires, i);
-		if(!wire->touchable)
-			wire->state = wire->state_buf;
-	}
-}
-
-//-----------------------------------------------------------------------------
-size_t get_wire_from_pixel(size_t x, size_t y){
-	for(size_t i = 0; i < hda_get_item_fill(&global_wires); i++){
-		wire_t* wire = hda_get_reference(&global_wires, i);
+size_t get_wire_from_pixel(bit_widget_t* widget, size_t x, size_t y){
+	for(size_t i = 0; i < hda_get_item_fill(&widget->wires); i++){
+		wire_t* wire = hda_get_reference(&widget->wires, i);
 		for(size_t p = 0; p < hda_get_item_fill(&wire->pixels); p++){
 			struct {size_t x, y;} pix;
 			hda_get(&wire->pixels, p, &pix);
@@ -470,11 +416,111 @@ size_t get_wire_from_pixel(size_t x, size_t y){
 }
 
 //-----------------------------------------------------------------------------
-size_t get_gate_from_pixel(size_t x, size_t y){
-	for(size_t i = 0; i < hda_get_item_fill(&global_gates); i++){
-		gate_t* gate = hda_get_reference(&global_gates, i);
+size_t get_gate_from_pixel(bit_widget_t* widget, size_t x, size_t y){
+	for(size_t i = 0; i < hda_get_item_fill(&widget->gates); i++){
+		gate_t* gate = hda_get_reference(&widget->gates, i);
 		if(gate->x == x && gate->y == y) return i;
 		if(gate->x + direction_x[gate->direction] == x && gate->y + direction_y[gate->direction] == y) return i;
 	}
 	return -1;
+}
+
+//-----------------------------------------------------------------------------
+int bitwid_init(bit_widget_t* widget, char* filename){
+	hda_init(&widget->gates, sizeof(gate_t));
+	hda_init(&widget->wires, sizeof(wire_t));
+	hda_init(&widget->crossings, sizeof(size_t)*2);
+	widget->image = LoadImage(filename);
+	widget->filename = malloc(strlen(filename)+1);
+	memcpy(widget->filename, filename, strlen(filename)+1);
+    
+	printf("[BITWIDGETS] Extracting gates...\n");
+	extract_gates(widget);
+	//...
+	printf("[BITWIDGETS] Extracting Wires...\n");
+	extract_wires(widget);
+	//...
+	printf("[BITWIDGETS] Attaching gates and wires...\n");
+	attack_gate_to_wires(widget);
+	printf("[BITWIDGETS] Ready!\n");
+	//-----------------------------------
+	return 0;
+}
+//-----------------------------------------------------------------------------
+void bitwid_deinit(bit_widget_t* widget){
+	UnloadImage(widget->image);
+	free(widget->filename);
+	hda_deinit(&widget->gates);
+	for(size_t i = 0; i < hda_get_item_fill(&widget->wires); i++){
+		wire_t* wire = hda_get_reference(&widget->wires, i);
+		hda_deinit(&wire->pixels);
+	}
+	hda_deinit(&widget->wires);
+	hda_deinit(&widget->crossings);
+}
+//-----------------------------------------------------------------------------
+void bitwid_render_screen(bit_widget_t* widget, int x, int y, int scale){
+	// Draw Gates
+	for(size_t i = 0; i < hda_get_item_fill(&widget->gates); i++){
+		gate_t* gate = hda_get_reference(&widget->gates, i);
+		DrawRectangle(gate->x*scale + x, gate->y*scale + y, 
+						scale, scale, GetColor(GATE_INPUT));
+		DrawRectangle((gate->x + direction_x[gate->direction])*scale + x, 
+						(gate->y + direction_y[gate->direction])*scale + y, 
+						scale, scale, GetColor(gate->type));
+	}
+
+	// Draw Wires
+	for(size_t i = 0; i < hda_get_item_fill(&widget->wires); i++){
+		wire_t* wire = hda_get_reference(&widget->wires, i);
+		for(size_t p = 0; p < hda_get_item_fill(&wire->pixels); p++){
+			struct {size_t x, y;} pix;
+			hda_get(&wire->pixels, p, &pix);
+			if(wire->state){
+				DrawRectangle(pix.x*scale + x, pix.y*scale + y, 
+									scale, scale, GetColor(wire->color));
+			}
+			else{
+				DrawRectangle(pix.x*scale + x, pix.y*scale + y, 
+									scale, scale, lower_color(GetColor(wire->color)));
+			}
+		}
+	}
+
+	// Draw Crossings
+	for(size_t i = 0; i < hda_get_item_fill(&widget->crossings); i++){
+		struct {size_t x, y;} pix;
+		hda_get(&widget->crossings, i, &pix);
+		DrawRectangle(pix.x*scale + x, pix.y*scale + y, 
+							scale, scale, GetColor(WIRE_CROSSING));
+	}
+}
+//-----------------------------------------------------------------------------
+void bitwid_simulate(bit_widget_t* widget, int steps){
+	for(int s = 0; s < steps; s++){
+		//Clear buffers
+		for(size_t i = 0; i < hda_get_item_fill(&widget->wires); i++){
+			wire_t* wire = hda_get_reference(&widget->wires, i);
+			if(!wire->touchable)
+				wire->state_buf = 0;
+		}
+		// Evaluate Outputs of gates
+		for(size_t i = 0; i < hda_get_item_fill(&widget->gates); i++){
+			gate_t* gate = hda_get_reference(&widget->gates, i);
+			wire_t* wire_out = hda_get_reference(&widget->wires, gate->output_wire_id);
+			wire_t* wire_in = hda_get_reference(&widget->wires, gate->input_wire_id);
+			if(gate->type == NOT_GATE){
+				if(!wire_in->state) wire_out->state_buf = 1;
+			}
+			else if(gate->type == DIODE){
+				if(wire_in->state) wire_out->state_buf = 1;
+			}
+		}
+		// Swap Buffers
+		for(size_t i = 0; i < hda_get_item_fill(&widget->wires); i++){
+			wire_t* wire = hda_get_reference(&widget->wires, i);
+			if(!wire->touchable)
+				wire->state = wire->state_buf;
+		}
+	}
 }

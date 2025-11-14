@@ -4,7 +4,7 @@
 // implement the functions of the library
 //-----------------------------------------------------------------------------
 // Author		: github.com/SMDHuman
-// Last Update	: 13.11.2025
+// Last Update	: 14.11.2025
 //-----------------------------------------------------------------------------
 #ifndef HH_DARRAY_INIT_SIZE
 #define HH_DARRAY_INIT_SIZE 16
@@ -215,12 +215,9 @@ void hh_darray_clear(hh_darray_t* array);
 
 	//-----------------------------------------------------------------------------
 	size_t hh_darray_is_inside(hh_darray_t* array, void* item){
-		void *array_item = malloc(array->word); 
 		for(size_t i = 0; i < hh_darray_get_item_fill(array); i++){
-			hh_darray_get(array, i, array_item);
-			if(memcmp(array_item, item, array->word) == 0) return i;
+			if(memcmp(hh_darray_get_reference(array, i), item, array->word) == 0) return i;
 		}
-		free(array_item);
 		return -1;
 	}
 	//-----------------------------------------------------------------------------
