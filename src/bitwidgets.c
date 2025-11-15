@@ -7,6 +7,7 @@
 #include <raylib.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 #define HH_ARGPARSE_SHORT_PREFIX
 #define HH_ARGPARSE_IMPLEMENTATION
@@ -78,16 +79,15 @@ int bitwid_init(bit_widget_t* widget, char* filename);
 void bitwid_deinit(bit_widget_t* widget);
 void bitwid_render_screen(bit_widget_t* widget, int x, int y, int scale);
 void bitwid_simulate(bit_widget_t* widget, int steps);
-
-//-----------------------------------------------------------------------------
-// Function Prototypes
 static void extract_gates(bit_widget_t* widget);
 static void extract_wires(bit_widget_t* widget);
 static void attack_gate_to_wires(bit_widget_t* widget);
 static wire_color_e get_wire_color(Color color);
+static bool get_wire_state(Color color);
 static Color lower_color(Color color);
 static size_t get_wire_from_pixel(bit_widget_t* widget, size_t x, size_t y);
 static size_t get_gate_from_pixel(bit_widget_t* widget, size_t x, size_t y);
+static void preprocess_image(bit_widget_t* widget);
 
 //-----------------------------------------------------------------------------
 
@@ -98,22 +98,34 @@ int main(int argc, char**argv){
 	// Get optional arguments
 	int render_scale = 1;
 	int simulation_rate = 60;
+	int target_fps = 60;
+	bool adjust_simrate = 0;
 	// Render Scale
 	if(hap_check_op_short_or_long(argpar, 's', "scale")){
 		char *rc_str = hap_get_op_short_or_long(argpar, 's', "scale");
 		render_scale = atoi(rc_str);
+	}
+	// Target FPS
+	if(hap_check_op_short_or_long(argpar, 'f', "target-fps")){
+		char *sr_str = hap_get_op_short_or_long(argpar, 'f', "target-fps");
+		target_fps = atoi(sr_str);
 	}
 	// Simulation Rate
 	if(hap_check_op_short_or_long(argpar, 'r', "rate")){
 		char *sr_str = hap_get_op_short_or_long(argpar, 'r', "rate");
 		simulation_rate = atoi(sr_str);
 	}
+	// Adjust Simulation Rate
+	adjust_simrate = hap_check_op_short_or_long(argpar, 'a', "adjust-simrate");
 	// Help Message
 	if(hap_check_op_short_or_long(argpar, 'h', "help")){
 		printf("BitWidgets - A simple logic gate simulator using images as circuit blueprints.\n");
 		printf("Usage: bitwidgets [options] <circuit_image_path>\n\n");
 		printf("Options:\n");
 		printf("  -s, --scale <num>      Set render scale (default: 1)\n");
+		printf("  -r, --rate <num>       Set simulation rate in Hz (default: 60)\n");
+		printf("  -f, --target-fps <num> Set target FPS for rendering (default: 60)\n");
+		printf("  -a, --adjust-simrate	 Enable automatic adjustment of simulation rate (default: disabled)\n");
 		printf("  -h, --help             Show this help message\n");
 		return 0;
 	}
@@ -129,7 +141,7 @@ int main(int argc, char**argv){
 				   FLAG_WINDOW_TRANSPARENT | 
 				   FLAG_WINDOW_TOPMOST);
 	InitWindow(100, 100, "BitWidgets");
-	SetTargetFPS(60);
+	SetTargetFPS(target_fps);
 	//...
 
 	//...
@@ -137,47 +149,51 @@ int main(int argc, char**argv){
 	SetWindowSize(widget.image.width * render_scale, widget.image.height * render_scale);
 	//-----------------------------------------------------------------------------
 	// Main Loop
-    while (!WindowShouldClose())
-    {	
-    	if(IsMouseButtonPressed(0)){
-    		int mouse_x = GetMouseX() / render_scale;
-    		int mouse_y = GetMouseY() / render_scale;
-    		size_t wire_id = get_wire_from_pixel(&widget, mouse_x, mouse_y);
-    		if(wire_id != (size_t)-1){
-    			printf("wire id: %ld\n", wire_id);
-	    		wire_t* wire = hda_get_reference(&widget.wires, wire_id);
-					if(wire->touchable) wire->state = !wire->state;
-    		}
-    	}
-    	
-			//---------------------------------------------------------------------
-			// Simulation Steps
-			static long sim_accumulator = 0;
-			double start_time = GetTime();
-			while(sim_accumulator < GetTime() * simulation_rate){
-				bitwid_simulate(&widget, 1);
-				sim_accumulator++;
-				if(GetTime() - start_time > 1){
-					printf("Warning: Simulation is lagging behind real time!\n");
-					break;
-				}
+  while (!WindowShouldClose()){	
+		if(IsMouseButtonPressed(0)){
+			int mouse_x = GetMouseX() / render_scale;
+			int mouse_y = GetMouseY() / render_scale;
+			size_t wire_id = get_wire_from_pixel(&widget, mouse_x, mouse_y);
+			if(wire_id != (size_t)-1){
+				printf("wire id: %ld\n", wire_id);
+				wire_t* wire = hda_get_reference(&widget.wires, wire_id);
+				if(wire->touchable) wire->state = !wire->state;
 			}
-			// Report Performance
-			static double last_report_time = 0;
-			if(GetTime() - last_report_time >= 0.1f){
-				printf("[BITWIDGETS] FPS: %d| Gates: %ld | Wires: %ld\n", 
-							GetFPS(),  hda_get_item_fill(&widget.gates), hda_get_item_fill(&widget.wires));
-				last_report_time = GetTime();
+		}
+		
+		//---------------------------------------------------------------------
+		// Simulation Steps
+		static long sim_accumulator = 0;
+		double start_time = GetTime();
+		while(sim_accumulator < GetTime() * simulation_rate){
+			bitwid_simulate(&widget, 1);
+			sim_accumulator++;
+			if(GetTime() - start_time > 1.0){
+				break;
 			}
-			//---------------------------------------------------------------------
-			BeginDrawing();
-			//...
-			ClearBackground((Color){0, 0, 0, 0});
-			bitwid_render_screen(&widget, 0, 0, render_scale);
-       	
-			//---------------------------------------------------------------------
-			EndDrawing();
-    }
+		}
+		// Report Performance
+		static double last_report_time = 0;
+		if(GetTime() - last_report_time >= 0.1f){
+			printf("[BITWIDGETS] FPS: %d| Gates: %ld | Wires: %ld | simulation_rate: %d\n" , 
+						GetFPS(),  hda_get_item_fill(&widget.gates), hda_get_item_fill(&widget.wires), simulation_rate);
+			last_report_time = GetTime();
+			// Adjust Simulation Rate
+			if(adjust_simrate){
+				float dt_err = (1.0f / (float)(target_fps-10)) - GetFrameTime();
+				if(fabs(dt_err) > 0.001)
+				simulation_rate += 10 * (dt_err > 0 ? 1 : -1);
+			}
+		}
+		//---------------------------------------------------------------------
+		BeginDrawing();
+		//...
+		ClearBackground((Color){0, 0, 0, 0});
+		bitwid_render_screen(&widget, 0, 0, render_scale);
+			
+		//---------------------------------------------------------------------
+		EndDrawing();
+	}
 
 	//---------------------------------------------------------------------------
 	CloseWindow();
@@ -244,6 +260,7 @@ void extract_wires(bit_widget_t* widget){
 			wire_t* new_wire = hda_get_end_reference(&widget->wires);
 			hda_init(&new_wire->pixels, sizeof(size_t)*2);
 			new_wire->color = temp_color;
+			new_wire->state = get_wire_state(color);
 			new_wire->touchable = true;
 			// Flood fill wire
 			hh_darray_t checker; hda_init(&checker, sizeof(size_t)*2);
@@ -374,6 +391,14 @@ wire_color_e get_wire_color(Color color){
 }
 
 //-----------------------------------------------------------------------------
+bool get_wire_state(Color color){
+	if(color.r > 128 || color.g > 128 || color.b > 128) 
+		return HIGH;
+	else
+		return LOW;
+}
+
+//-----------------------------------------------------------------------------
 Color lower_color(Color color){
 	return (Color){color.r/2, color.g/2, color.b/2, color.a};
 }
@@ -433,6 +458,7 @@ int bitwid_init(bit_widget_t* widget, char* filename){
 	widget->image = LoadImage(filename);
 	widget->filename = malloc(strlen(filename)+1);
 	memcpy(widget->filename, filename, strlen(filename)+1);
+	preprocess_image(widget);
     
 	printf("[BITWIDGETS] Extracting gates...\n");
 	extract_gates(widget);
@@ -521,6 +547,25 @@ void bitwid_simulate(bit_widget_t* widget, int steps){
 			wire_t* wire = hda_get_reference(&widget->wires, i);
 			if(!wire->touchable)
 				wire->state = wire->state_buf;
+		}
+	}
+}
+//-----------------------------------------------------------------------------
+static void preprocess_image(bit_widget_t* widget){
+	for(size_t y = 0; y < (unsigned int)widget->image.height; y++){
+		for(size_t x = 0; x < (unsigned int)widget->image.width; x++){
+			Color color = GetImageColor(widget->image, x, y);
+			if(color.r < 63) color.r = 0;
+			else if(color.r > 192) color.r = 255;
+			else color.r = 128;
+			if(color.g < 63) color.g = 0;
+			else if(color.g > 192) color.g = 255;
+			else color.g = 128;
+			if(color.b < 63) color.b = 0;
+			else if(color.b > 192) color.b = 255;
+			else color.b = 128;
+			color.a = 255;
+			ImageDrawPixel(&widget->image, x, y, color);
 		}
 	}
 }

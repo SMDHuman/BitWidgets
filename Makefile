@@ -12,3 +12,7 @@ build:
 .PHONY: clean
 clean:
 	rm -rf build
+
+.PHONY: demo
+demo:
+	./build/bitwidgets ./circuits/40Test.png -s 10 -r 10
